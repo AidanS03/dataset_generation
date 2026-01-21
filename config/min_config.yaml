@@ -1,0 +1,64 @@
+# Minimal config for my_replicator
+CONFIG:
+  renderer: "RayTracedLighting"
+  headless: false
+  width: 640
+  height: 480
+
+# Image size
+WIDTH: 640
+HEIGHT: 480
+
+# Camera intrinsics (rough defaults)
+F_X: 600
+F_Y: 600
+pixel_size: 0.005  # mm per pixel
+
+# Camera rotation (Euler degrees)
+CAMERA_ROTATION: [0, 0, 0]
+
+# Simple object settings
+CUBE_SCALE: [0.1, 0.1, 0.1]
+CLASS_NAME: "cube"
+
+# Use a custom USD asset if available
+# Update the path below to your local asset
+OBJECT_USD: "/home/aidans03/Documents/Research/Projects/isaac-sim/solo_cup.usdc"
+
+# Dome light textures (optional)
+# Set DOME_TEXTURES_BASE to the folder containing HDRI files; list names without extension
+USE_DOME_LIGHT: true                    # Will change the lighting of the background
+DOME_LIGHT_INTENSITY: 500.0
+DOME_TEXTURES_BASE: "/home/aidans03/Documents/Research/Projects/isaac-sim/my_replicator/backgrounds"
+DOME_TEXTURES:
+  - university_workshop_4k
+  - christmas_photo_studio_07_4k
+  - climbing_gym_4k
+  - peppermint_powerplant_4k
+  - warm_restaurant_4k
+
+# Extra driven lights (sphere key/fill). If your scene looks too bright, either:
+#  - lower LIGHTS_SPHERE_INTENSITY_SCALE, OR
+#  - set LIGHT_KEY_INTENSITY / LIGHT_FILL_INTENSITY directly.
+LIGHTS_SPHERE_INTENSITY_SCALE: 0.25      # Will change the lighting of the object
+# LIGHT_KEY_INTENSITY: 15000
+# LIGHT_FILL_INTENSITY: 8000
+
+# Randomization ranges for object position
+# NOTE: The legacy MIN_POSITION/MAX_POSITION was far too large and caused the cup to be off-camera most frames.
+# Use the OBJ_* keys instead (read by min_replicator.py).
+OBJ_XY_MIN: [-0.10, -0.10]
+OBJ_XY_MAX: [0.10, 0.10]
+
+# Ground is created at z=0. We spawn the cup so its *bottom* is above the ground.
+# If your USD's origin is already at the bottom, set CUP_HEIGHT_M to 0.0.
+USE_GROUND_PLANE: false
+GROUND_PLANE_SCALE: [10.0, 10.0, 1.0]
+GROUND_Z: 0.0
+CUP_HEIGHT_M: 0.12
+
+# Optional: keep these unset unless you really want to override the safer OBJ_* ranges.
+# MIN_POSITION: [-5.0, -5.0, -5.0]
+# MAX_POSITION: [5.0, 5.0, 5.0]
+
+OBJECT_SCALE: [1.0, 1.0, 1.0]
