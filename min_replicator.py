@@ -9,6 +9,7 @@ import os
 import argparse
 import yaml
 import numpy as np
+import random
 
 from isaacsim import SimulationApp
 
@@ -114,6 +115,40 @@ def main():
             scale=cfg.get("CUBE_SCALE", [0.08, 0.08, 0.08]),
             semantics=[("class", class_name)],
         )
+
+    # --- Distractors (unlabeled / not annotated) ---
+    # We intentionally DO NOT set any semantics on distractors. Writers like PoseWriter only
+    # include prims with relevant semantics, so these act as visual noise only.
+    distractor_dir = cfg.get(
+        "DISTRACTOR_DIR",
+        os.path.join(os.path.dirname(__file__), "assets"),
+    )
+    distractor_count = int(cfg.get("DISTRACTOR_COUNT", 0))
+    distractor_scale_min = tuple(cfg.get("DISTRACTOR_SCALE_MIN", [0.8, 0.8, 0.8]))
+    distractor_scale_max = tuple(cfg.get("DISTRACTOR_SCALE_MAX", [1.2, 1.2, 1.2]))
+    distractor_rot_min = _vec3(cfg.get("DISTRACTOR_ROT_MIN"), default=(0.0, 0.0, -180.0), name="DISTRACTOR_ROT_MIN")
+    distractor_rot_max = _vec3(cfg.get("DISTRACTOR_ROT_MAX"), default=(0.0, 0.0, 180.0), name="DISTRACTOR_ROT_MAX")
+
+    distractor_assets = []
+    if distractor_count > 0:
+        try:
+            if os.path.isdir(distractor_dir):
+                for fn in sorted(os.listdir(distractor_dir)):
+                    if fn.lower().endswith((".usd", ".usda", ".usdc")):
+                        distractor_assets.append(os.path.join(distractor_dir, fn))
+        except Exception:
+            distractor_assets = []
+
+    distractors = []
+    if distractor_count > 0 and distractor_assets:
+        # Choose a random asset per distractor instance (allows future multi-asset folders).
+        for i in range(distractor_count):
+            chosen_usd = random.choice(distractor_assets)
+            # No semantics => not annotated.
+            d = rep.create.from_usd(chosen_usd)
+            distractors.append(d)
+    elif distractor_count > 0 and not distractor_assets:
+        print(f"[min_replicator] WARNING: DISTRACTOR_COUNT={distractor_count} but no .usd/.usda/.usdc found in {distractor_dir}")
 
     # If you're spawning the Solo cup USD, keep its authored materials.
     # For the fallback cube, force a strong red PBR material so it's obvious.
@@ -279,6 +314,22 @@ def main():
                     count=1,
                 )
                 rep.randomizer.materials(mats)
+
+        # Randomize distractor poses (visual noise only; no semantics attached).
+        # Default behavior: keep them near the object so they appear in-frame.
+        if distractors:
+            d_pos_min = _vec3(cfg.get("DISTRACTOR_POS_MIN"), default=(float(min_pos[0]) - 0.5, float(min_pos[1]) - 0.5, float(min_pos[2]) - 0.05), name="DISTRACTOR_POS_MIN")
+            d_pos_max = _vec3(cfg.get("DISTRACTOR_POS_MAX"), default=(float(max_pos[0]) + 0.5, float(max_pos[1]) + 0.5, float(max_pos[2]) + 0.35), name="DISTRACTOR_POS_MAX")
+            d_pos_dist = rep.distribution.uniform(d_pos_min, d_pos_max)
+            d_scale_dist = rep.distribution.uniform(distractor_scale_min, distractor_scale_max)
+
+            for d in distractors:
+                with d:
+                    rep.modify.pose(
+                        position=d_pos_dist,
+                        rotation=rep.distribution.uniform(distractor_rot_min, distractor_rot_max),
+                        scale=d_scale_dist,
+                    )
 
         # Move the camera.
         # Default behavior is to keep using look_at so the object stays centered.

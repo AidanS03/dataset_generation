@@ -23,7 +23,7 @@ CLASS_NAME: "cube"
 
 # Use a custom USD asset if available
 # Update the path below to your local asset
-OBJECT_USD: "/home/aidans03/Documents/Research/Projects/isaac-sim/solo_cup.usdc"
+OBJECT_USD: "/home/aidans03/Documents/Research/Projects/isaac-sim/my_replicator/assets/solo_cup.usdc"
 
 # Dome light textures (optional)
 # Set DOME_TEXTURES_BASE to the folder containing HDRI files; list names without extension
@@ -73,6 +73,20 @@ CUP_HEIGHT_M: 0.12
 # MAX_POSITION: [5.0, 5.0, 5.0]
 
 OBJECT_SCALE: [1.0, 1.0, 1.0]
+
+# Distractors (visual noise; NOT annotated)
+# Put .usd/.usda/.usdc files into my_replicator/assets and set DISTRACTOR_COUNT > 0.
+DISTRACTOR_DIR: "/home/aidans03/Documents/Research/Projects/isaac-sim/my_replicator/assets"
+DISTRACTOR_COUNT: 1
+
+# Optional pose/scale ranges for the distractors
+# (By default the script places them near the target object.)
+# DISTRACTOR_POS_MIN: [-0.7, -0.7, 0.0]
+# DISTRACTOR_POS_MAX: [0.7, 0.7, 0.8]
+DISTRACTOR_SCALE_MIN: [0.8, 0.8, 0.8]
+DISTRACTOR_SCALE_MAX: [1.2, 1.2, 1.2]
+DISTRACTOR_ROT_MIN: [0, 0, -180]
+DISTRACTOR_ROT_MAX: [0, 0, 180]
 
 # Camera randomization
 # Preferred knobs (per-axis):
