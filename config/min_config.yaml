@@ -47,8 +47,19 @@ LIGHTS_SPHERE_INTENSITY_SCALE: 0.25      # Will change the lighting of the objec
 # Randomization ranges for object position
 # NOTE: The legacy MIN_POSITION/MAX_POSITION was far too large and caused the cup to be off-camera most frames.
 # Use the OBJ_* keys instead (read by min_replicator.py).
+
+# Object translation bounds (meters)
+# Preferred knobs (per-axis):
+OBJ_POS_MIN: [-0.2, -0.2, -0.2]
+OBJ_POS_MAX: [0.2, 0.2, 0.2]
+
+# Backward compat (still supported):
 OBJ_XY_MIN: [-0.10, -0.10]
 OBJ_XY_MAX: [0.10, 0.10]
+
+# Object rotation bounds (degrees)
+OBJ_ROT_MIN: [0, 0, 0]
+OBJ_ROT_MAX: [0.5, 0.5, 0.5]
 
 # Ground is created at z=0. We spawn the cup so its *bottom* is above the ground.
 # If your USD's origin is already at the bottom, set CUP_HEIGHT_M to 0.0.
@@ -62,3 +73,28 @@ CUP_HEIGHT_M: 0.12
 # MAX_POSITION: [5.0, 5.0, 5.0]
 
 OBJECT_SCALE: [1.0, 1.0, 1.0]
+
+# Camera randomization
+# Preferred knobs (per-axis):
+CAM_POS_MIN: [-1,-1, -1]
+CAM_POS_MAX: [1,1,1]
+
+# By default we keep the camera pointed at the object (recommended).
+CAM_USE_LOOK_AT: true
+
+# If true, the camera always looks at the sampled object position.
+# If false, the look target is sampled independently (using the bounds below).
+CAM_USE_OBJECT_POS_AS_LOOK_AT: true
+
+# Optional: jitter the look_at target around the object (meters)
+CAM_LOOK_AT_OFFSET_MIN: [0.0, 0.0, 0.0]
+CAM_LOOK_AT_OFFSET_MAX: [0.05, 0.05, 0.05]
+
+# If you set CAM_USE_LOOK_AT: false, these bounds are used instead (degrees)
+CAM_ROT_MIN: [0, 0, 0]
+CAM_ROT_MAX: [0, 0, 0]
+
+# Backward compat: you can still provide CAM_POSITIONS as a curated list
+# CAM_POSITIONS:
+#   - [0.00, -1.60, 0.80]
+#   - [0.00, -1.20, 0.55]

@@ -49,6 +49,14 @@ def main():
     import omni.replicator.core as rep
     from isaacsim.core.api import World
 
+    def _vec3(value, *, default=None, name=""):
+        """Convert a config value into a 3-tuple of floats (or return default)."""
+        if value is None:
+            return tuple(default) if default is not None else None
+        if not isinstance(value, (list, tuple)) or len(value) != 3:
+            raise ValueError(f"Expected {name} to be a 3-element list/tuple, got: {value!r}")
+        return (float(value[0]), float(value[1]), float(value[2]))
+
     world = World(physics_dt=1.0 / 60.0)
     world.reset()
 
@@ -168,6 +176,10 @@ def main():
     # Keep translations tight and spawn the cup ABOVE the ground.
     # Practical note: many USD assets have their pivot at the *center*, not the bottom.
     # If so, a pivot z==ground_z means "half the mesh is underground".
+    # Prefer per-axis bounds (OBJ_POS_MIN/OBJ_POS_MAX). Fall back to legacy XY/Z keys.
+    obj_pos_min = cfg.get("OBJ_POS_MIN")
+    obj_pos_max = cfg.get("OBJ_POS_MAX")
+
     xy_min = cfg.get("OBJ_XY_MIN", [-0.10, -0.10])
     xy_max = cfg.get("OBJ_XY_MAX", [0.10, 0.10])
     ground_z = float(cfg.get("GROUND_Z", 0.0))
@@ -199,28 +211,45 @@ def main():
     # (In your previous config these were ±5 meters, so the object was off-camera a lot.)
     min_pos = cfg.get("MIN_POSITION")
     max_pos = cfg.get("MAX_POSITION")
-    if min_pos is None or max_pos is None:
+
+    if obj_pos_min is not None and obj_pos_max is not None:
+        min_pos = list(_vec3(obj_pos_min, name="OBJ_POS_MIN"))
+        max_pos = list(_vec3(obj_pos_max, name="OBJ_POS_MAX"))
+        # Keep Z safe by clamping to the computed safe lift.
+        min_pos[2] = max(float(min_pos[2]), z_min)
+        max_pos[2] = max(float(max_pos[2]), min_pos[2] + 1e-3)
+    elif min_pos is None or max_pos is None:
         min_pos = [xy_min[0], xy_min[1], z_min]
         max_pos = [xy_max[0], xy_max[1], z_max]
     else:
         min_pos = [min_pos[0], min_pos[1], max(float(min_pos[2]), z_min)]
         max_pos = [max_pos[0], max_pos[1], max(float(max_pos[2]), min_pos[2] + 1e-3)]
 
-    # Camera viewpoints.
-    # Replicator distributions don't support arbitrary arithmetic/trig in Python, so we use
-    # a curated set of positions (overrideable via YAML).
+    # Object rotation bounds (degrees)
+    obj_rot_min = _vec3(cfg.get("OBJ_ROT_MIN"), default=(0.0, -10.0, -25.0), name="OBJ_ROT_MIN")
+    obj_rot_max = _vec3(cfg.get("OBJ_ROT_MAX"), default=(0.0, 10.0, 25.0), name="OBJ_ROT_MAX")
+
+    # Camera pose bounds.
+    # Prefer per-axis bounds (CAM_POS_MIN/CAM_POS_MAX and CAM_ROT_MIN/CAM_ROT_MAX).
+    # If CAM_POSITIONS is provided, we keep supporting it.
     cam_positions = cfg.get("CAM_POSITIONS")
-    if cam_positions is None:
-        cam_positions = [
-            (0.00, -1.60, 0.80),
-            (0.00, -1.20, 0.55),
-            (0.60, -1.10, 0.65),
-            (-0.60, -1.10, 0.65),
-            (0.90, -0.70, 0.75),
-            (-0.90, -0.70, 0.75),
-            (0.85, -1.40, 0.95),
-            (-0.85, -1.40, 0.95),
-        ]
+    cam_pos_min = cfg.get("CAM_POS_MIN")
+    cam_pos_max = cfg.get("CAM_POS_MAX")
+    cam_rot_min = cfg.get("CAM_ROT_MIN")
+    cam_rot_max = cfg.get("CAM_ROT_MAX")
+
+    # Defaults roughly match the previous curated list bounds.
+    cam_pos_min_v = _vec3(cam_pos_min, default=(-0.90, -1.60, 0.55), name="CAM_POS_MIN")
+    cam_pos_max_v = _vec3(cam_pos_max, default=(0.90, -0.70, 0.95), name="CAM_POS_MAX")
+
+    # If you use look_at (below), camera rotation is optional. But sometimes you may
+    # want to disable look_at and randomize Euler rotations directly.
+    cam_rot_min_v = _vec3(cam_rot_min, default=(0.0, 0.0, 0.0), name="CAM_ROT_MIN")
+    cam_rot_max_v = _vec3(cam_rot_max, default=(0.0, 0.0, 0.0), name="CAM_ROT_MAX")
+
+    cam_use_look_at = bool(cfg.get("CAM_USE_LOOK_AT", True))
+    cam_look_at_offset_min = _vec3(cfg.get("CAM_LOOK_AT_OFFSET_MIN"), default=(0.0, 0.0, 0.0), name="CAM_LOOK_AT_OFFSET_MIN")
+    cam_look_at_offset_max = _vec3(cfg.get("CAM_LOOK_AT_OFFSET_MAX"), default=(0.0, 0.0, 0.0), name="CAM_LOOK_AT_OFFSET_MAX")
 
     with rep.trigger.on_frame():
         # Randomize HDR dome background per frame (optional).
@@ -237,7 +266,7 @@ def main():
         with obj:
             rep.modify.pose(
                 position=pos_dist,
-                rotation=rep.distribution.uniform((0, -10, -25), (0, 10, 25)),
+                rotation=rep.distribution.uniform(obj_rot_min, obj_rot_max),
             )
 
             # Avoid overriding the Solo cup USD material (it can look gray if the random
@@ -251,14 +280,55 @@ def main():
                 )
                 rep.randomizer.materials(mats)
 
-        # Move the camera but always look at the sampled object position.
+        # Move the camera.
+        # Default behavior is to keep using look_at so the object stays centered.
+        # If you set CAM_USE_LOOK_AT: false, then CAM_ROT_MIN/MAX will be used instead.
         with camera:
-            rep.modify.pose(
-                position=rep.distribution.choice(cam_positions),
-                look_at=pos_dist,
-            )
+            if cam_positions is not None:
+                cam_position_dist = rep.distribution.choice(cam_positions)
+            else:
+                cam_position_dist = rep.distribution.uniform(cam_pos_min_v, cam_pos_max_v)
 
-    # Step for N frames
+            if cam_use_look_at:
+                # ReplicatorItems don't support python-side arithmetic, so express
+                # the "look_at jitter" as bounds around the target directly.
+                look_at_target = rep.distribution.uniform(
+                    (
+                        float(min_pos[0]) + cam_look_at_offset_min[0],
+                        float(min_pos[1]) + cam_look_at_offset_min[1],
+                        float(min_pos[2]) + cam_look_at_offset_min[2],
+                    ),
+                    (
+                        float(max_pos[0]) + cam_look_at_offset_max[0],
+                        float(max_pos[1]) + cam_look_at_offset_max[1],
+                        float(max_pos[2]) + cam_look_at_offset_max[2],
+                    ),
+                )
+                # Better default: keep looking at the sampled object position.
+                # If you want fully decoupled look targets, set CAM_USE_OBJECT_POS_AS_LOOK_AT: false.
+                use_obj_look_at = bool(cfg.get("CAM_USE_OBJECT_POS_AS_LOOK_AT", True))
+                rep.modify.pose(
+                    position=cam_position_dist,
+                    look_at=pos_dist if use_obj_look_at else look_at_target,
+                )
+            else:
+                rep.modify.pose(
+                    position=cam_position_dist,
+                    rotation=rep.distribution.uniform(cam_rot_min_v, cam_rot_max_v),
+                )
+
+    # The very first frame after `preview()` often renders with incomplete state
+    # (e.g., white background while materials / dome textures / RTX settle).
+    # Warm up once and discard it, then write exactly `--frames` outputs.
+    #
+    # Important: `rep.orchestrator.step()` triggers writers, so we temporarily
+    # detach the writer during warm-up to avoid an extra image on disk.
+    writer.detach()
+    rep.orchestrator.step(rt_subframes=2)
+    writer.attach([render_product])
+    print("[min_replicator] Discarded warm-up frame 0 (not written)")
+
+    # Step for N frames (written)
     for idx in range(args.frames):
         rep.orchestrator.step(rt_subframes=2)
         print(f"[min_replicator] Wrote frame {idx+1}/{args.frames} to {args.output}")
