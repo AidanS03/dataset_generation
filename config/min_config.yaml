@@ -75,14 +75,33 @@ CUP_HEIGHT_M: 0.12
 OBJECT_SCALE: [1.0, 1.0, 1.0]
 
 # Distractors (visual noise; NOT annotated)
-# Put .usd/.usda/.usdc files into my_replicator/assets and set DISTRACTOR_COUNT > 0.
-DISTRACTOR_DIR: "/home/aidans03/Documents/Research/Projects/isaac-sim/my_replicator/assets"
-DISTRACTOR_COUNT: 1
+#
+# Isaac Sim built-in assets are referenced via a virtual path (e.g. /Isaac/Props/...).
+# Like the official `pose_generation.py`, we resolve these against the Isaac assets root.
+DISTRACTOR_COUNT: 50
+
+# Option A (recommended): official-style
+DISTRACTOR_ASSET_PATH: /Isaac/Props/YCB/Axis_Aligned/
+
+# If DISTRACTOR_FILENAMES is omitted or empty, min_replicator.py will auto-discover
+# all .usd/.usda/.usdc files in DISTRACTOR_ASSET_PATH and sample from them.
+# To pin to a curated subset, set DISTRACTOR_FILENAMES to a non-empty list.
+# DISTRACTOR_FILENAMES:
+#   - 002_master_chef_can
+#   - 004_sugar_box
+
+# Option B: explicit full USD paths (uncomment to use)
+# DISTRACTOR_USDS:
+#   - /Isaac/Props/YCB/Axis_Aligned/002_master_chef_can.usd
+#   - /Isaac/Props/YCB/Axis_Aligned/004_sugar_box.usd
+
+# Option C: local filesystem folder scan (only works for real directories)
+# DISTRACTOR_DIR: "/home/aidans03/Documents/Research/Projects/isaac-sim/my_replicator/assets"
 
 # Optional pose/scale ranges for the distractors
 # (By default the script places them near the target object.)
-# DISTRACTOR_POS_MIN: [-0.7, -0.7, 0.0]
-# DISTRACTOR_POS_MAX: [0.7, 0.7, 0.8]
+DISTRACTOR_POS_MIN: [-0.7, -0.7, 0.0]
+DISTRACTOR_POS_MAX: [0.7, 0.7, 0.8]
 DISTRACTOR_SCALE_MIN: [0.8, 0.8, 0.8]
 DISTRACTOR_SCALE_MAX: [1.2, 1.2, 1.2]
 DISTRACTOR_ROT_MIN: [0, 0, -180]

@@ -49,6 +49,11 @@ def main():
 
     import omni.replicator.core as rep
     from isaacsim.core.api import World
+    try:
+        # Available when running inside Isaac Sim / Kit.
+        from isaacsim.storage.native import get_assets_root_path
+    except Exception:
+        get_assets_root_path = None
 
     def _vec3(value, *, default=None, name=""):
         """Convert a config value into a 3-tuple of floats (or return default)."""
@@ -119,28 +124,109 @@ def main():
     # --- Distractors (unlabeled / not annotated) ---
     # We intentionally DO NOT set any semantics on distractors. Writers like PoseWriter only
     # include prims with relevant semantics, so these act as visual noise only.
-    distractor_dir = cfg.get(
-        "DISTRACTOR_DIR",
-        os.path.join(os.path.dirname(__file__), "assets"),
-    )
+    #
+    # IMPORTANT: Isaac Sim paths like "/Isaac/Props/YCB/Axis_Aligned/" are NOT filesystem paths.
+    # To support those, we resolve them via Isaac's assets root (like the official
+    # `standalone_examples/replicator/pose_generation/pose_generation.py`).
     distractor_count = int(cfg.get("DISTRACTOR_COUNT", 0))
     distractor_scale_min = tuple(cfg.get("DISTRACTOR_SCALE_MIN", [0.8, 0.8, 0.8]))
     distractor_scale_max = tuple(cfg.get("DISTRACTOR_SCALE_MAX", [1.2, 1.2, 1.2]))
     distractor_rot_min = _vec3(cfg.get("DISTRACTOR_ROT_MIN"), default=(0.0, 0.0, -180.0), name="DISTRACTOR_ROT_MIN")
     distractor_rot_max = _vec3(cfg.get("DISTRACTOR_ROT_MAX"), default=(0.0, 0.0, 180.0), name="DISTRACTOR_ROT_MAX")
 
+    # Config options (supports both local and Isaac assets):
+    # 1) DISTRACTOR_USDS: explicit list of USD paths (best for virtual paths)
+    # 2) DISTRACTOR_ASSET_PATH + DISTRACTOR_FILENAMES: official-example style
+    # 3) DISTRACTOR_ASSET_PATH alone (no filenames): auto-discover all USDs in that folder via omni.client.list()
+    # 3) DISTRACTOR_DIR: local folder containing .usd/.usda/.usdc files (legacy)
+    distractor_usds = cfg.get("DISTRACTOR_USDS")
+    distractor_asset_path = cfg.get("DISTRACTOR_ASSET_PATH")
+    distractor_filenames = cfg.get("DISTRACTOR_FILENAMES")
+    distractor_dir = cfg.get("DISTRACTOR_DIR", os.path.join(os.path.dirname(__file__), "assets"))
+
     distractor_assets = []
     if distractor_count > 0:
-        try:
-            if os.path.isdir(distractor_dir):
-                for fn in sorted(os.listdir(distractor_dir)):
-                    if fn.lower().endswith((".usd", ".usda", ".usdc")):
-                        distractor_assets.append(os.path.join(distractor_dir, fn))
-        except Exception:
-            distractor_assets = []
+        # (1) Explicit list always wins.
+        if isinstance(distractor_usds, list) and distractor_usds:
+            distractor_assets = [str(p) for p in distractor_usds]
+        # (2) Isaac assets folder.
+        # If filenames are provided, use that curated list.
+        # If filenames are missing/empty, auto-discover all USDs in the folder.
+        elif distractor_asset_path:
+            assets_root_path = None
+            if get_assets_root_path is not None:
+                try:
+                    assets_root_path = get_assets_root_path()
+                except Exception:
+                    assets_root_path = None
+            if assets_root_path is None:
+                # Some Isaac builds expose this helper from a different module path.
+                try:
+                    from omni.isaac.core.utils.nucleus import get_assets_root_path as _get_assets_root_path
+
+                    assets_root_path = _get_assets_root_path()
+                except Exception:
+                    assets_root_path = None
+            if assets_root_path is None:
+                print(
+                    "[min_replicator] WARNING: Could not resolve Isaac assets root; "
+                    "can't expand DISTRACTOR_ASSET_PATH. "
+                    "Try running with Isaac assets installed/mounted or use DISTRACTOR_USDS / DISTRACTOR_DIR."
+                )
+            else:
+                # Note: DISTRACTOR_ASSET_PATH is usually like "/Isaac/Props/YCB/Axis_Aligned/".
+                # The official example does: assets_root_path + DISTRACTOR_ASSET_PATH
+                base = str(assets_root_path) + str(distractor_asset_path)
+
+                # Ensure trailing slash so combine_urls behaves predictably.
+                if not base.endswith("/"):
+                    base = base + "/"
+
+                if isinstance(distractor_filenames, list) and distractor_filenames:
+                    for name in distractor_filenames:
+                        # allow either with or without extension in YAML
+                        if str(name).lower().endswith((".usd", ".usda", ".usdc")):
+                            distractor_assets.append(f"{base}{name}")
+                        else:
+                            distractor_assets.append(f"{base}{name}.usd")
+                else:
+                    # Auto-discover everything in the folder.
+                    try:
+                        import omni
+
+                        result, entries = omni.client.list(base)
+                        if result != omni.client.Result.OK:
+                            print(
+                                "[min_replicator] WARNING: omni.client.list failed for "
+                                f"{base!r} (result={result}). Provide DISTRACTOR_FILENAMES or DISTRACTOR_USDS."
+                            )
+                        else:
+                            for entry in entries:
+                                rel = str(entry.relative_path)
+                                if rel.lower().endswith((".usd", ".usda", ".usdc")):
+                                    distractor_assets.append(omni.client.combine_urls(base, rel))
+                    except Exception as e:
+                        print(
+                            "[min_replicator] WARNING: Failed to auto-discover distractors from "
+                            f"{base!r}: {e}. Provide DISTRACTOR_FILENAMES or DISTRACTOR_USDS."
+                        )
+        # (3) Legacy local folder scan (filesystem only)
+        else:
+            try:
+                if os.path.isdir(distractor_dir):
+                    for fn in sorted(os.listdir(distractor_dir)):
+                        if fn.lower().endswith((".usd", ".usda", ".usdc")):
+                            distractor_assets.append(os.path.join(distractor_dir, fn))
+            except Exception:
+                distractor_assets = []
 
     distractors = []
     if distractor_count > 0 and distractor_assets:
+        # Helpful debug: show what we're about to sample from (virtual paths can be opaque).
+        preview_list = ", ".join([str(p) for p in distractor_assets[:3]])
+        more = "" if len(distractor_assets) <= 3 else f" (+{len(distractor_assets)-3} more)"
+        print(f"[min_replicator] Resolved {len(distractor_assets)} distractor asset(s): {preview_list}{more}")
+
         # Choose a random asset per distractor instance (allows future multi-asset folders).
         for i in range(distractor_count):
             chosen_usd = random.choice(distractor_assets)
@@ -148,7 +234,12 @@ def main():
             d = rep.create.from_usd(chosen_usd)
             distractors.append(d)
     elif distractor_count > 0 and not distractor_assets:
-        print(f"[min_replicator] WARNING: DISTRACTOR_COUNT={distractor_count} but no .usd/.usda/.usdc found in {distractor_dir}")
+        print(
+            "[min_replicator] WARNING: DISTRACTOR_COUNT="
+            f"{distractor_count} but no distractor assets were resolved. "
+            "Provide one of: DISTRACTOR_USDS, or (DISTRACTOR_ASSET_PATH + DISTRACTOR_FILENAMES), "
+            f"or a real local folder in DISTRACTOR_DIR. Got DISTRACTOR_DIR={distractor_dir!r}"
+        )
 
     # If you're spawning the Solo cup USD, keep its authored materials.
     # For the fallback cube, force a strong red PBR material so it's obvious.
@@ -320,15 +411,16 @@ def main():
         if distractors:
             d_pos_min = _vec3(cfg.get("DISTRACTOR_POS_MIN"), default=(float(min_pos[0]) - 0.5, float(min_pos[1]) - 0.5, float(min_pos[2]) - 0.05), name="DISTRACTOR_POS_MIN")
             d_pos_max = _vec3(cfg.get("DISTRACTOR_POS_MAX"), default=(float(max_pos[0]) + 0.5, float(max_pos[1]) + 0.5, float(max_pos[2]) + 0.35), name="DISTRACTOR_POS_MAX")
-            d_pos_dist = rep.distribution.uniform(d_pos_min, d_pos_max)
-            d_scale_dist = rep.distribution.uniform(distractor_scale_min, distractor_scale_max)
-
             for d in distractors:
                 with d:
                     rep.modify.pose(
-                        position=d_pos_dist,
+                        # Important: create a *separate* distribution node per distractor.
+                        # If you reuse the same distribution object for all prims, Replicator
+                        # may evaluate it once per frame, causing all distractors to share the
+                        # same sampled position.
+                        position=rep.distribution.uniform(d_pos_min, d_pos_max),
                         rotation=rep.distribution.uniform(distractor_rot_min, distractor_rot_max),
-                        scale=d_scale_dist,
+                        scale=rep.distribution.uniform(distractor_scale_min, distractor_scale_max),
                     )
 
         # Move the camera.
