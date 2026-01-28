@@ -10,6 +10,8 @@ import argparse
 import yaml
 import numpy as np
 import random
+import json
+from pathlib import Path
 
 from isaacsim import SimulationApp
 
@@ -23,6 +25,225 @@ def main():
 
     with open(args.config, "r") as f:
         cfg = yaml.safe_load(f)
+
+    def _normalize_class_name(raw: str, mode: str) -> str:
+        if raw is None:
+            return ""
+        raw = str(raw).strip()
+        if mode == "full":
+            return raw
+        # default: first token (handles assets that encode multiple comma-separated labels)
+        return raw.split(",", 1)[0].strip()
+
+    def _bbox_from_projected_cuboid(points, width_px: int, height_px: int):
+        """Compute [x, y, w, h] bbox from DOPE projected cuboid points."""
+        if not points or not isinstance(points, list):
+            return None
+        xs = []
+        ys = []
+        for p in points:
+            if not isinstance(p, (list, tuple)) or len(p) != 2:
+                continue
+            xs.append(float(p[0]))
+            ys.append(float(p[1]))
+        if not xs or not ys:
+            return None
+        x0 = max(0.0, min(xs))
+        y0 = max(0.0, min(ys))
+        x1 = min(float(width_px), max(xs))
+        y1 = min(float(height_px), max(ys))
+        w = max(0.0, x1 - x0)
+        h = max(0.0, y1 - y0)
+        if w <= 1e-6 or h <= 1e-6:
+            return None
+        return [x0, y0, w, h]
+
+    def _export_coco_and_or_yolo(output_dir: str, width_px: int, height_px: int, expected_frames: int | None = None):
+        """Convert PoseWriter DOPE JSONs into COCO and/or YOLO datasets."""
+        export_mode = str(cfg.get("DATASET_EXPORT", "coco")).strip().lower()
+        if export_mode in ("", "none", "off", "false"):
+            return
+
+        class_mode = str(cfg.get("DATASET_CLASS_MODE", "first_token")).strip().lower()
+        if class_mode not in ("first_token", "full"):
+            class_mode = "first_token"
+        class_mode_internal = "full" if class_mode == "full" else "first_token"
+
+        include_classes = cfg.get("DATASET_INCLUDE_CLASSES")
+        exclude_classes = cfg.get("DATASET_EXCLUDE_CLASSES")
+        include_set = None
+        exclude_set = None
+        if isinstance(include_classes, list) and include_classes:
+            include_set = {str(c).strip() for c in include_classes}
+        else:
+            # Safer default: only export the configured primary class.
+            primary = _normalize_class_name(str(cfg.get("CLASS_NAME", "")), class_mode_internal)
+            if primary:
+                include_set = {primary}
+        if isinstance(exclude_classes, list) and exclude_classes:
+            exclude_set = {str(c).strip() for c in exclude_classes}
+
+        out_path = Path(output_dir)
+        if not out_path.exists():
+            return
+
+        # PoseWriter writes files like 000000.png and 000000.json.
+        # Writers can flush asynchronously, so wait briefly for the expected count.
+        try:
+            import time
+
+            if isinstance(expected_frames, int) and expected_frames > 0:
+                deadline = time.time() + float(cfg.get("DATASET_EXPORT_WAIT_S", 5.0))
+                while time.time() < deadline:
+                    image_files = [p for p in out_path.iterdir() if p.is_file() and p.suffix.lower() == ".png"]
+                    if len(image_files) >= expected_frames:
+                        break
+                    time.sleep(0.1)
+        except Exception:
+            pass
+
+        image_files = sorted([p for p in out_path.iterdir() if p.is_file() and p.suffix.lower() == ".png"])
+        if not image_files:
+            print(f"[min_replicator] DATASET_EXPORT requested but no .png found in {output_dir}")
+            return
+
+        # Build COCO structures.
+        coco = {
+            "info": {"description": "isaac-sim replicator export", "version": "1.0"},
+            "licenses": [],
+            "images": [],
+            "annotations": [],
+            "categories": [],
+        }
+        category_name_to_id = {}
+        next_category_id = 1
+        next_annotation_id = 1
+
+        def get_category_id(name: str) -> int:
+            nonlocal next_category_id
+            if name not in category_name_to_id:
+                category_name_to_id[name] = next_category_id
+                next_category_id += 1
+            return category_name_to_id[name]
+
+        # YOLO output settings
+        yolo_dir_name = str(cfg.get("YOLO_DIRNAME", "yolo")).strip() or "yolo"
+        yolo_root = out_path / yolo_dir_name
+        yolo_images = yolo_root / "images"
+        yolo_labels = yolo_root / "labels"
+        yolo_use_symlinks = bool(cfg.get("YOLO_USE_SYMLINKS", True))
+
+        do_yolo = export_mode in ("yolo", "both")
+        do_coco = export_mode in ("coco", "detectron", "detectron2", "both")
+
+        if do_yolo:
+            yolo_images.mkdir(parents=True, exist_ok=True)
+            yolo_labels.mkdir(parents=True, exist_ok=True)
+
+        for img_id, img_path in enumerate(image_files, start=1):
+            stem = img_path.stem
+            json_path = img_path.with_suffix(".json")
+            if not json_path.exists():
+                # some pipelines may omit JSON; skip
+                continue
+
+            try:
+                frame = json.loads(json_path.read_text(encoding="utf-8"))
+            except Exception as e:
+                print(f"[min_replicator] WARNING: Failed reading {json_path}: {e}")
+                continue
+
+            coco["images"].append(
+                {
+                    "id": img_id,
+                    "file_name": img_path.name,
+                    "width": int(width_px),
+                    "height": int(height_px),
+                }
+            )
+
+            objects = frame.get("objects", [])
+            yolo_lines = []
+
+            for obj_data in objects:
+                raw_class = obj_data.get("class", "")
+                class_name = _normalize_class_name(raw_class, class_mode_internal)
+                if not class_name:
+                    continue
+
+                if include_set is not None and class_name not in include_set:
+                    continue
+                if exclude_set is not None and class_name in exclude_set:
+                    continue
+
+                bbox = _bbox_from_projected_cuboid(obj_data.get("projected_cuboid"), width_px, height_px)
+                if bbox is None:
+                    continue
+
+                if do_coco:
+                    category_id = get_category_id(class_name)
+                    coco["annotations"].append(
+                        {
+                            "id": next_annotation_id,
+                            "image_id": img_id,
+                            "category_id": category_id,
+                            "bbox": [float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])],
+                            "area": float(bbox[2] * bbox[3]),
+                            "iscrowd": 0,
+                        }
+                    )
+                    next_annotation_id += 1
+
+                if do_yolo:
+                    # YOLO expects class indices 0..N-1.
+                    # We'll derive that from COCO categories (stable per run).
+                    category_id = get_category_id(class_name)
+                    cls_idx = category_id - 1
+                    x, y, w, h = bbox
+                    cx = (x + w / 2.0) / float(width_px)
+                    cy = (y + h / 2.0) / float(height_px)
+                    nw = w / float(width_px)
+                    nh = h / float(height_px)
+                    yolo_lines.append(f"{cls_idx} {cx:.6f} {cy:.6f} {nw:.6f} {nh:.6f}")
+
+            if do_yolo:
+                # Link/copy the image into YOLO layout.
+                dst_img = yolo_images / img_path.name
+                if not dst_img.exists():
+                    try:
+                        if yolo_use_symlinks:
+                            dst_img.symlink_to(img_path)
+                        else:
+                            dst_img.write_bytes(img_path.read_bytes())
+                    except Exception:
+                        # fallback to copy
+                        try:
+                            dst_img.write_bytes(img_path.read_bytes())
+                        except Exception:
+                            pass
+
+                (yolo_labels / f"{stem}.txt").write_text("\n".join(yolo_lines) + ("\n" if yolo_lines else ""), encoding="utf-8")
+
+        if do_coco:
+            coco["categories"] = [
+                {"id": cid, "name": name, "supercategory": "none"}
+                for name, cid in sorted(category_name_to_id.items(), key=lambda kv: kv[1])
+            ]
+            coco_filename = str(cfg.get("COCO_FILENAME", "annotations_coco.json")).strip() or "annotations_coco.json"
+            (out_path / coco_filename).write_text(json.dumps(coco, indent=2), encoding="utf-8")
+            print(f"[min_replicator] Wrote COCO annotations: {out_path / coco_filename}")
+
+        if do_yolo:
+            # Ultralytics-style data.yaml
+            names = [name for name, _ in sorted(category_name_to_id.items(), key=lambda kv: kv[1])]
+            data_yaml = {
+                "path": str(yolo_root),
+                "train": "images",
+                "val": "images",
+                "names": names,
+            }
+            (yolo_root / "data.yaml").write_text(yaml.safe_dump(data_yaml, sort_keys=False), encoding="utf-8")
+            print(f"[min_replicator] Wrote YOLO dataset: {yolo_root}")
 
     # Ensure output dir exists
     os.makedirs(args.output, exist_ok=True)
@@ -271,9 +492,39 @@ def main():
     use_dome = bool(cfg.get("USE_DOME_LIGHT", False))
     dome_intensity = float(cfg.get("DOME_LIGHT_INTENSITY", 1.0))
     dome_paths = []
-    if use_dome and dome_textures_base and dome_textures:
-        # Build HDR texture paths (expects names without extension)
-        dome_paths = [os.path.join(dome_textures_base, f"{name}.hdr") for name in dome_textures]
+    if use_dome and dome_textures_base:
+        # If DOME_TEXTURES is provided (names without extension), use that curated list.
+        if isinstance(dome_textures, list) and dome_textures:
+            dome_paths = [os.path.join(dome_textures_base, f"{name}.hdr") for name in dome_textures]
+        else:
+            # Otherwise, auto-discover textures from the folder.
+            # Supports local filesystem folders and (best-effort) Omniverse URLs via omni.client.
+            base = str(dome_textures_base)
+            try:
+                if os.path.isdir(base):
+                    for fn in sorted(os.listdir(base)):
+                        if fn.lower().endswith((".hdr", ".exr")):
+                            dome_paths.append(os.path.join(base, fn))
+                else:
+                    # Try omni.client for non-filesystem paths.
+                    if "://" in base:
+                        import omni
+
+                        url = base if base.endswith("/") else base + "/"
+                        result, entries = omni.client.list(url)
+                        if result == omni.client.Result.OK:
+                            for entry in entries:
+                                rel = str(entry.relative_path)
+                                if rel.lower().endswith((".hdr", ".exr")):
+                                    dome_paths.append(omni.client.combine_urls(url, rel))
+            except Exception as e:
+                print(f"[min_replicator] WARNING: Failed to auto-discover dome textures from {base!r}: {e}")
+
+        if use_dome and not dome_paths:
+            print(
+                "[min_replicator] WARNING: USE_DOME_LIGHT is enabled but no dome textures were found. "
+                "Set DOME_TEXTURES (names) or place .hdr/.exr files under DOME_TEXTURES_BASE."
+            )
     # We randomize rotation/texture per-frame below by creating a new Dome light
     # on each frame. Replicator's light "texture" is not exposed as a simple
     # writable USD attribute in all builds, so create-time randomization is the
@@ -475,6 +726,13 @@ def main():
     for idx in range(args.frames):
         rep.orchestrator.step(rt_subframes=2)
         print(f"[min_replicator] Wrote frame {idx+1}/{args.frames} to {args.output}")
+
+    # Optional post-processing export for training datasets.
+    # Converts PoseWriter's per-frame DOPE JSON into COCO (Detectron2-friendly) and/or YOLO.
+    try:
+        _export_coco_and_or_yolo(args.output, int(width), int(height), expected_frames=int(args.frames))
+    except Exception as e:
+        print(f"[min_replicator] WARNING: Dataset export failed: {e}")
 
     kit.close()
 

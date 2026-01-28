@@ -30,12 +30,13 @@ OBJECT_USD: "/home/aidans03/Documents/Research/Projects/isaac-sim/my_replicator/
 USE_DOME_LIGHT: true                    # Will change the lighting of the background
 DOME_LIGHT_INTENSITY: 500.0
 DOME_TEXTURES_BASE: "/home/aidans03/Documents/Research/Projects/isaac-sim/my_replicator/backgrounds"
-DOME_TEXTURES:
-  - university_workshop_4k
-  - christmas_photo_studio_07_4k
-  - climbing_gym_4k
-  - peppermint_powerplant_4k
-  - warm_restaurant_4k
+
+# If DOME_TEXTURES is omitted/empty, min_replicator.py will auto-discover all
+# .hdr/.exr files in DOME_TEXTURES_BASE and randomly sample from them each frame.
+# To pin to a curated subset, set DOME_TEXTURES (names without extension).
+# DOME_TEXTURES:
+#   - university_workshop_4k
+#   - christmas_photo_studio_07_4k
 
 # Extra driven lights (sphere key/fill). If your scene looks too bright, either:
 #  - lower LIGHTS_SPHERE_INTENSITY_SCALE, OR
@@ -131,3 +132,23 @@ CAM_ROT_MAX: [0, 0, 0]
 # CAM_POSITIONS:
 #   - [0.00, -1.60, 0.80]
 #   - [0.00, -1.20, 0.55]
+
+# Dataset export (post-process PoseWriter outputs)
+#
+# PoseWriter writes per-frame image + DOPE-style JSON (cuboid keypoints).
+# The script can convert those into:
+#  - COCO JSON (Detectron2-friendly) and/or
+#  - YOLO txt labels (+ a minimal data.yaml)
+DATASET_EXPORT: coco          # coco | yolo | both | none
+COCO_FILENAME: annotations_coco.json
+DATASET_CLASS_MODE: first_token  # first_token | full
+DATASET_EXPORT_WAIT_S: 5.0
+
+# Optional filters:
+# If omitted, it defaults to [CLASS_NAME].
+# DATASET_INCLUDE_CLASSES: ["cube"]
+# DATASET_EXCLUDE_CLASSES: []
+
+# YOLO output layout is written under: <output>/<YOLO_DIRNAME>/
+YOLO_DIRNAME: yolo
+YOLO_USE_SYMLINKS: true
