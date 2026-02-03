@@ -144,6 +144,26 @@ COCO_FILENAME: annotations_coco.json
 DATASET_CLASS_MODE: first_token  # first_token | full
 DATASET_EXPORT_WAIT_S: 5.0
 
+# COCO/Detectron2 split export
+# When enabled, images are reorganized into:
+#   <output>/train
+#   <output>/validation
+#   <output>/test
+# and each split gets a single COCO JSON at:
+#   <split>/annotations.json
+DATASET_SPLIT_ENABLE: true
+DATASET_SPLIT_TRAIN: 0.80
+DATASET_SPLIT_VALIDATION: 0.10
+DATASET_SPLIT_TEST: 0.10
+DATASET_SPLIT_COCO_FILENAME: annotations.json
+
+# If true, remove PoseWriter per-frame DOPE JSONs after COCO export.
+# (These per-image JSONs are not COCO and can confuse training pipelines.)
+DATASET_SPLIT_CLEANUP_FRAME_JSON: true
+
+# If true, also write a root-level COCO file next to the original outputs.
+DATASET_SPLIT_WRITE_ROOT_COCO: false
+
 # Optional filters:
 # If omitted, it defaults to [CLASS_NAME].
 # DATASET_INCLUDE_CLASSES: ["cube"]

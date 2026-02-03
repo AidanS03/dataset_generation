@@ -64,6 +64,20 @@ def main():
         if export_mode in ("", "none", "off", "false"):
             return
 
+        # Optional: split COCO export into train/validation/test folders.
+        # This is Detectron2-friendly: you register each split with its JSON + image_root.
+        split_enable = bool(cfg.get("DATASET_SPLIT_ENABLE", True))
+        split_seed = cfg.get("DATASET_SPLIT_SEED")
+        split_train = float(cfg.get("DATASET_SPLIT_TRAIN", 0.80))
+        split_val = float(cfg.get("DATASET_SPLIT_VALIDATION", 0.10))
+        split_test = float(cfg.get("DATASET_SPLIT_TEST", 0.10))
+        split_folder_train = str(cfg.get("DATASET_SPLIT_DIR_TRAIN", "train")).strip() or "train"
+        split_folder_val = str(cfg.get("DATASET_SPLIT_DIR_VALIDATION", "validation")).strip() or "validation"
+        split_folder_test = str(cfg.get("DATASET_SPLIT_DIR_TEST", "test")).strip() or "test"
+        split_coco_filename = str(cfg.get("DATASET_SPLIT_COCO_FILENAME", "annotations.json")).strip() or "annotations.json"
+        split_cleanup_frame_json = bool(cfg.get("DATASET_SPLIT_CLEANUP_FRAME_JSON", True))
+        split_write_root_coco = bool(cfg.get("DATASET_SPLIT_WRITE_ROOT_COCO", False))
+
         class_mode = str(cfg.get("DATASET_CLASS_MODE", "first_token")).strip().lower()
         if class_mode not in ("first_token", "full"):
             class_mode = "first_token"
@@ -136,95 +150,237 @@ def main():
         do_yolo = export_mode in ("yolo", "both")
         do_coco = export_mode in ("coco", "detectron", "detectron2", "both")
 
+        if split_enable and do_yolo:
+            print(
+                "[min_replicator] WARNING: DATASET_SPLIT_ENABLE is true but DATASET_EXPORT includes YOLO. "
+                "Skipping YOLO export to avoid broken symlinks/paths; set DATASET_SPLIT_ENABLE: false to export YOLO."
+            )
+            do_yolo = False
+
         if do_yolo:
             yolo_images.mkdir(parents=True, exist_ok=True)
             yolo_labels.mkdir(parents=True, exist_ok=True)
 
-        for img_id, img_path in enumerate(image_files, start=1):
-            stem = img_path.stem
+        # First pass: parse frames once. We'll reuse this for root COCO, split COCO, and YOLO.
+        records = []
+        for img_path in image_files:
             json_path = img_path.with_suffix(".json")
             if not json_path.exists():
-                # some pipelines may omit JSON; skip
                 continue
-
             try:
                 frame = json.loads(json_path.read_text(encoding="utf-8"))
             except Exception as e:
                 print(f"[min_replicator] WARNING: Failed reading {json_path}: {e}")
                 continue
 
-            coco["images"].append(
-                {
-                    "id": img_id,
-                    "file_name": img_path.name,
-                    "width": int(width_px),
-                    "height": int(height_px),
-                }
-            )
-
             objects = frame.get("objects", [])
-            yolo_lines = []
-
+            parsed_objs = []
             for obj_data in objects:
                 raw_class = obj_data.get("class", "")
                 class_name = _normalize_class_name(raw_class, class_mode_internal)
                 if not class_name:
                     continue
-
                 if include_set is not None and class_name not in include_set:
                     continue
                 if exclude_set is not None and class_name in exclude_set:
                     continue
-
                 bbox = _bbox_from_projected_cuboid(obj_data.get("projected_cuboid"), width_px, height_px)
                 if bbox is None:
                     continue
 
-                if do_coco:
-                    category_id = get_category_id(class_name)
+                category_id = get_category_id(class_name)
+                parsed_objs.append({"category_id": category_id, "bbox": bbox})
+
+            records.append({"img_path": img_path, "json_path": json_path, "objects": parsed_objs})
+
+        if not records:
+            print(f"[min_replicator] DATASET_EXPORT requested but no usable frames found in {output_dir}")
+            return
+
+        # Root COCO (single JSON next to images) if requested.
+        if do_coco and (not split_enable or split_write_root_coco):
+            next_annotation_id = 1
+            coco["images"].clear()
+            coco["annotations"].clear()
+            for img_id, rec in enumerate(records, start=1):
+                coco["images"].append(
+                    {"id": img_id, "file_name": rec["img_path"].name, "width": int(width_px), "height": int(height_px)}
+                )
+                for obj in rec["objects"]:
+                    x, y, w, h = obj["bbox"]
                     coco["annotations"].append(
                         {
                             "id": next_annotation_id,
                             "image_id": img_id,
-                            "category_id": category_id,
-                            "bbox": [float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])],
-                            "area": float(bbox[2] * bbox[3]),
+                            "category_id": int(obj["category_id"]),
+                            "bbox": [float(x), float(y), float(w), float(h)],
+                            "area": float(w * h),
                             "iscrowd": 0,
                         }
                     )
                     next_annotation_id += 1
 
-                if do_yolo:
-                    # YOLO expects class indices 0..N-1.
-                    # We'll derive that from COCO categories (stable per run).
-                    category_id = get_category_id(class_name)
-                    cls_idx = category_id - 1
-                    x, y, w, h = bbox
+        # YOLO export (single set) if enabled.
+        if do_yolo:
+            for rec in records:
+                stem = rec["img_path"].stem
+                yolo_lines = []
+                for obj in rec["objects"]:
+                    cls_idx = int(obj["category_id"]) - 1
+                    x, y, w, h = obj["bbox"]
                     cx = (x + w / 2.0) / float(width_px)
                     cy = (y + h / 2.0) / float(height_px)
                     nw = w / float(width_px)
                     nh = h / float(height_px)
                     yolo_lines.append(f"{cls_idx} {cx:.6f} {cy:.6f} {nw:.6f} {nh:.6f}")
 
-            if do_yolo:
-                # Link/copy the image into YOLO layout.
-                dst_img = yolo_images / img_path.name
+                dst_img = yolo_images / rec["img_path"].name
                 if not dst_img.exists():
                     try:
                         if yolo_use_symlinks:
-                            dst_img.symlink_to(img_path)
+                            dst_img.symlink_to(rec["img_path"])
                         else:
-                            dst_img.write_bytes(img_path.read_bytes())
+                            dst_img.write_bytes(rec["img_path"].read_bytes())
                     except Exception:
-                        # fallback to copy
                         try:
-                            dst_img.write_bytes(img_path.read_bytes())
+                            dst_img.write_bytes(rec["img_path"].read_bytes())
                         except Exception:
                             pass
 
                 (yolo_labels / f"{stem}.txt").write_text("\n".join(yolo_lines) + ("\n" if yolo_lines else ""), encoding="utf-8")
 
-        if do_coco:
+        # Split COCO export (Detectron2 style):
+        #   <output>/train/annotations.json + images
+        #   <output>/validation/annotations.json + images
+        #   <output>/test/annotations.json + images
+        if do_coco and split_enable:
+            # Determine a stable seed if not provided.
+            if split_seed is None:
+                meta = out_path / "metadata.txt"
+                if meta.exists():
+                    try:
+                        meta_obj = json.loads(meta.read_text(encoding="utf-8"))
+                        split_seed = meta_obj.get("replicator_global_seed:")
+                    except Exception:
+                        split_seed = None
+
+            try:
+                split_seed_int = int(split_seed) if split_seed is not None else 0
+            except Exception:
+                split_seed_int = 0
+
+            total = len(records)
+            # Normalize ratios in case user config is slightly off.
+            ratios_sum = max(1e-9, float(split_train) + float(split_val) + float(split_test))
+            train_ratio = float(split_train) / ratios_sum
+            val_ratio = float(split_val) / ratios_sum
+
+            n_train = int(total * train_ratio)
+            n_val = int(total * val_ratio)
+            n_test = total - n_train - n_val
+            if n_test < 0:
+                n_test = 0
+            # Ensure we don't drop samples due to rounding.
+            if n_train + n_val + n_test < total:
+                n_test += total - (n_train + n_val + n_test)
+            if n_train + n_val + n_test > total:
+                n_test = max(0, total - n_train - n_val)
+
+            rng = random.Random(split_seed_int)
+            shuffled = list(records)
+            rng.shuffle(shuffled)
+
+            split_map = {
+                split_folder_train: shuffled[:n_train],
+                split_folder_val: shuffled[n_train : n_train + n_val],
+                split_folder_test: shuffled[n_train + n_val : n_train + n_val + n_test],
+            }
+
+            # Categories are shared across all split JSONs for consistency.
+            categories = [
+                {"id": cid, "name": name, "supercategory": "none"}
+                for name, cid in sorted(category_name_to_id.items(), key=lambda kv: kv[1])
+            ]
+
+            def _safe_move(src: Path, dst: Path):
+                import shutil
+
+                if dst.exists():
+                    try:
+                        dst.unlink()
+                    except Exception:
+                        pass
+                try:
+                    shutil.move(str(src), str(dst))
+                except Exception:
+                    # fallback: copy + delete
+                    try:
+                        dst.write_bytes(src.read_bytes())
+                        src.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+
+            for split_dir_name, split_records in split_map.items():
+                split_dir = out_path / split_dir_name
+                split_dir.mkdir(parents=True, exist_ok=True)
+
+                split_coco = {
+                    "info": {"description": "isaac-sim replicator export", "version": "1.0"},
+                    "licenses": [],
+                    "images": [],
+                    "annotations": [],
+                    "categories": categories,
+                }
+                next_ann_id = 1
+                for new_img_id, rec in enumerate(split_records, start=1):
+                    dst_img = split_dir / rec["img_path"].name
+                    _safe_move(rec["img_path"], dst_img)
+
+                    # Either move frame JSON along with image, or delete it.
+                    if rec["json_path"].exists():
+                        if split_cleanup_frame_json:
+                            try:
+                                rec["json_path"].unlink(missing_ok=True)
+                            except Exception:
+                                pass
+                        else:
+                            dst_json = split_dir / rec["json_path"].name
+                            _safe_move(rec["json_path"], dst_json)
+
+                    split_coco["images"].append(
+                        {"id": new_img_id, "file_name": dst_img.name, "width": int(width_px), "height": int(height_px)}
+                    )
+                    for obj in rec["objects"]:
+                        x, y, w, h = obj["bbox"]
+                        split_coco["annotations"].append(
+                            {
+                                "id": next_ann_id,
+                                "image_id": new_img_id,
+                                "category_id": int(obj["category_id"]),
+                                "bbox": [float(x), float(y), float(w), float(h)],
+                                "area": float(w * h),
+                                "iscrowd": 0,
+                            }
+                        )
+                        next_ann_id += 1
+
+                (split_dir / split_coco_filename).write_text(json.dumps(split_coco, indent=2), encoding="utf-8")
+                print(f"[min_replicator] Wrote split COCO annotations: {split_dir / split_coco_filename}")
+
+            # Optional cleanup: remove any remaining root-level frame files.
+            if split_cleanup_frame_json:
+                try:
+                    for p in out_path.iterdir():
+                        if p.is_file() and p.suffix.lower() in (".png", ".json") and p.name[:6].isdigit():
+                            # These should have been moved/deleted already; remove any stragglers.
+                            if p.suffix.lower() == ".png":
+                                p.unlink(missing_ok=True)
+                            elif p.suffix.lower() == ".json":
+                                p.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+        if do_coco and (not split_enable or split_write_root_coco):
             coco["categories"] = [
                 {"id": cid, "name": name, "supercategory": "none"}
                 for name, cid in sorted(category_name_to_id.items(), key=lambda kv: kv[1])
