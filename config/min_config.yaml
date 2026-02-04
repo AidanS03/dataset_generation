@@ -17,19 +17,41 @@ pixel_size: 0.005  # mm per pixel
 # Camera rotation (Euler degrees)
 CAMERA_ROTATION: [0, 0, 0]
 
-# Simple object settings
-CUBE_SCALE: [0.1, 0.1, 0.1]
-CLASS_NAME: "cube"
+# Target objects
+#
+# Option A (recommended): multiple targets
+# Each entry becomes an annotated class in COCO/Detectron2.
+#
+TARGET_OBJECTS:
+  - CLASS_NAME: "cup"
+    USD: "/home/aidans03/Documents/Research/Projects/isaac-sim/my_replicator/assets/solo_cup.usdc"
+    COUNT: 2
+  - CLASS_NAME: "crushed_cup"
+    USD: "/home/aidans03/Documents/Research/Projects/isaac-sim/my_replicator/assets/crushed_cup.usdc"
+    COUNT: 2
+#
+# Optional per-target overrides:
+#   POS_MIN / POS_MAX: per-target spawn bounds (meters)
+#   ROT_MIN / ROT_MAX: per-target rotation bounds (degrees)
+#
+# Option B (legacy): single target
+# CUBE_SCALE: [0.1, 0.1, 0.1]
+# CLASS_NAME: "cup"
+# OBJECT_USD: "/home/aidans03/Documents/Research/Projects/isaac-sim/my_replicator/assets/solo_cup.usdc"
 
-# Use a custom USD asset if available
-# Update the path below to your local asset
-OBJECT_USD: "/home/aidans03/Documents/Research/Projects/isaac-sim/my_replicator/assets/solo_cup.usdc"
+# If true, strip any semantics authored inside USD child prims so PoseWriter only
+# annotates the configured target labels.
+TARGET_STRIP_CHILD_SEMANTICS: true
 
 # Dome light textures (optional)
 # Set DOME_TEXTURES_BASE to the folder containing HDRI files; list names without extension
 USE_DOME_LIGHT: true                    # Will change the lighting of the background
 DOME_LIGHT_INTENSITY: 500.0
 DOME_TEXTURES_BASE: "/home/aidans03/Documents/Research/Projects/isaac-sim/my_replicator/backgrounds"
+
+# Important for dome lighting stability:
+# Replicator recommends RTSubframes > 3 to avoid blank dome textures while randomizing HDRIs.
+RT_SUBFRAMES: 4
 
 # If DOME_TEXTURES is omitted/empty, min_replicator.py will auto-discover all
 # .hdr/.exr files in DOME_TEXTURES_BASE and randomly sample from them each frame.
@@ -119,6 +141,11 @@ CAM_USE_LOOK_AT: true
 # If true, the camera always looks at the sampled object position.
 # If false, the look target is sampled independently (using the bounds below).
 CAM_USE_OBJECT_POS_AS_LOOK_AT: true
+
+# When multiple targets exist, camera can look at:
+#   first  -> always the first target
+#   random -> randomly choose one target each frame
+CAM_LOOK_AT_TARGET_MODE: first
 
 # Optional: jitter the look_at target around the object (meters)
 CAM_LOOK_AT_OFFSET_MIN: [0.0, 0.0, 0.0]

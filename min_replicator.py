@@ -90,10 +90,25 @@ def main():
         if isinstance(include_classes, list) and include_classes:
             include_set = {str(c).strip() for c in include_classes}
         else:
-            # Safer default: only export the configured primary class.
-            primary = _normalize_class_name(str(cfg.get("CLASS_NAME", "")), class_mode_internal)
-            if primary:
-                include_set = {primary}
+            # Safer default: only export the configured target class(es).
+            # If TARGET_OBJECTS is set, include all of its CLASS_NAME entries.
+            target_classes = []
+            target_objects_cfg = cfg.get("TARGET_OBJECTS")
+            if isinstance(target_objects_cfg, list) and target_objects_cfg:
+                for t in target_objects_cfg:
+                    if isinstance(t, dict):
+                        cn = t.get("CLASS_NAME")
+                        if cn is None:
+                            cn = t.get("class_name")
+                        if cn:
+                            target_classes.append(str(cn))
+
+            if target_classes:
+                include_set = {_normalize_class_name(c, class_mode_internal) for c in target_classes if _normalize_class_name(c, class_mode_internal)}
+            else:
+                primary = _normalize_class_name(str(cfg.get("CLASS_NAME", "")), class_mode_internal)
+                if primary:
+                    include_set = {primary}
         if isinstance(exclude_classes, list) and exclude_classes:
             exclude_set = {str(c).strip() for c in exclude_classes}
 
@@ -483,20 +498,137 @@ def main():
     render_product = rep.create.render_product(camera, (width, height))
 
     # Load provided USD object (fallback to a small cube if not specified)
-    object_usd = cfg.get("OBJECT_USD")
-    class_name = cfg.get("CLASS_NAME", "object")
-    using_usd_asset = bool(object_usd and os.path.exists(object_usd))
-    if using_usd_asset:
-        obj = rep.create.from_usd(
-            object_usd,
-            semantics=[("class", class_name)],
-        )
-    else:
-        obj = rep.create.cube(
-            position=(0, 0, 0.35),
-            scale=cfg.get("CUBE_SCALE", [0.08, 0.08, 0.08]),
-            semantics=[("class", class_name)],
-        )
+    def _get_cfg_str(d: dict, *keys: str, default: str = "") -> str:
+        for k in keys:
+            if k in d and d[k] is not None:
+                return str(d[k])
+        return default
+
+    def _remove_semantics_props(prim) -> None:
+        # Semantics are typically authored as properties like:
+        #   semantics:<label>:type
+        #   semantics:<label>:data
+        # Remove any semantics:* properties from the prim.
+        try:
+            for prop in list(prim.GetProperties()):
+                name = prop.GetName()
+                if isinstance(name, str) and name.startswith("semantics:"):
+                    prim.RemoveProperty(name)
+        except Exception:
+            pass
+
+    def _strip_child_semantics(rep_item, *, keep_root: bool = True) -> None:
+        # Some USD assets come with their own authored semantics on child prims.
+        # PoseWriter will pick those up, resulting in extra objects in the per-frame JSON.
+        # We strip semantics from descendants so only the configured target label(s) remain.
+        try:
+            from pxr import Usd
+
+            prims = rep_item.get_output_prims().get("prims", [])
+            if not prims:
+                return
+            root_prim = prims[0]
+            for prim in Usd.PrimRange(root_prim):
+                if keep_root and prim.GetPath() == root_prim.GetPath():
+                    continue
+                _remove_semantics_props(prim)
+        except Exception:
+            pass
+
+    target_strip_child_semantics = bool(cfg.get("TARGET_STRIP_CHILD_SEMANTICS", True))
+
+    def _resolve_target_usd_path(p: str | None) -> str | None:
+        if not p:
+            return None
+        p = str(p)
+        if os.path.exists(p):
+            return p
+        # Allow Omniverse URLs.
+        if "://" in p:
+            return p
+        # Allow Isaac virtual paths (expand via assets root if available).
+        if p.startswith("/Isaac/") and get_assets_root_path is not None:
+            try:
+                root = get_assets_root_path()
+                if root:
+                    return str(root) + p
+            except Exception:
+                return p
+        return p
+
+    targets_cfg = cfg.get("TARGET_OBJECTS")
+    targets = []
+    if isinstance(targets_cfg, list) and targets_cfg:
+        for t in targets_cfg:
+            if not isinstance(t, dict):
+                continue
+            t_class = _get_cfg_str(t, "CLASS_NAME", "class_name", default="").strip()
+            if not t_class:
+                continue
+
+            t_usd = t.get("USD")
+            if t_usd is None:
+                t_usd = t.get("OBJECT_USD")
+            if t_usd is None:
+                t_usd = t.get("usd")
+            if t_usd is not None:
+                t_usd = _resolve_target_usd_path(str(t_usd))
+
+            t_count = t.get("COUNT", 1)
+            try:
+                t_count = int(t_count)
+            except Exception:
+                t_count = 1
+            t_count = max(1, t_count)
+
+            t_type = _get_cfg_str(t, "TYPE", "type", default="usd" if t_usd else "cube").strip().lower()
+            for _ in range(t_count):
+                if t_type == "usd" and t_usd:
+                    try:
+                        item = rep.create.from_usd(t_usd, semantics=[("class", t_class)])
+                        is_usd = True
+                    except Exception:
+                        item = rep.create.cube(position=(0, 0, 0.35), scale=cfg.get("CUBE_SCALE", [0.08, 0.08, 0.08]), semantics=[("class", t_class)])
+                        is_usd = False
+                else:
+                    # Fallback primitive target.
+                    cube_scale = t.get("CUBE_SCALE")
+                    if cube_scale is None:
+                        cube_scale = cfg.get("CUBE_SCALE", [0.08, 0.08, 0.08])
+                    item = rep.create.cube(position=(0, 0, 0.35), scale=cube_scale, semantics=[("class", t_class)])
+                    is_usd = False
+
+                if target_strip_child_semantics and is_usd:
+                    _strip_child_semantics(item, keep_root=True)
+
+                targets.append({"item": item, "class_name": t_class, "is_usd": is_usd, "cfg": t})
+
+        if not targets:
+            print("[min_replicator] WARNING: TARGET_OBJECTS was provided but no valid targets were created; falling back to OBJECT_USD/CLASS_NAME")
+
+    if not targets:
+        object_usd = _resolve_target_usd_path(cfg.get("OBJECT_USD"))
+        class_name = cfg.get("CLASS_NAME", "object")
+        using_usd_asset = bool(object_usd)
+        if using_usd_asset:
+            try:
+                obj = rep.create.from_usd(object_usd, semantics=[("class", class_name)])
+            except Exception:
+                using_usd_asset = False
+                obj = rep.create.cube(
+                    position=(0, 0, 0.35),
+                    scale=cfg.get("CUBE_SCALE", [0.08, 0.08, 0.08]),
+                    semantics=[("class", class_name)],
+                )
+            if target_strip_child_semantics:
+                _strip_child_semantics(obj, keep_root=True)
+        else:
+            obj = rep.create.cube(
+                position=(0, 0, 0.35),
+                scale=cfg.get("CUBE_SCALE", [0.08, 0.08, 0.08]),
+                semantics=[("class", class_name)],
+            )
+        targets = [{"item": obj, "class_name": str(class_name), "is_usd": bool(using_usd_asset), "cfg": {}}]
 
     # --- Distractors (unlabeled / not annotated) ---
     # We intentionally DO NOT set any semantics on distractors. Writers like PoseWriter only
@@ -620,7 +752,10 @@ def main():
 
     # If you're spawning the Solo cup USD, keep its authored materials.
     # For the fallback cube, force a strong red PBR material so it's obvious.
-    if not using_usd_asset:
+    # If you're spawning USD targets, keep authored materials. For primitive targets,
+    # force a strong red PBR material so it's obvious.
+    any_non_usd_target = any(not t.get("is_usd", False) for t in targets)
+    if any_non_usd_target:
         base_mat = rep.create.material_omnipbr(
             metallic=0.0,
             roughness=0.35,
@@ -629,8 +764,10 @@ def main():
             emissive_intensity=0.0,
             count=1,
         )
-        with obj:
-            rep.randomizer.materials(base_mat)
+        for t in targets:
+            if not t.get("is_usd", False):
+                with t["item"]:
+                    rep.randomizer.materials(base_mat)
 
     # Lighting: the previous sphere light was extremely bright and tended to wash out the render.
     # Use a couple of softer lights to keep highlights under control.
@@ -647,6 +784,23 @@ def main():
     dome_textures = cfg.get("DOME_TEXTURES", [])
     use_dome = bool(cfg.get("USE_DOME_LIGHT", False))
     dome_intensity = float(cfg.get("DOME_LIGHT_INTENSITY", 1.0))
+
+    # RTX subframes strongly affects lighting stability for dome textures.
+    # Replicator warns that `/omni/replicator/RTSubframes` should be > 3 to avoid blank textures
+    # while randomizing dome light texture.
+    rt_subframes = int(cfg.get("RT_SUBFRAMES", 4 if use_dome else 2))
+    if use_dome and rt_subframes < 4:
+        print(
+            f"[min_replicator] WARNING: RT_SUBFRAMES={rt_subframes} is too low for USE_DOME_LIGHT; "
+            "using 4 to avoid blank dome textures. Set RT_SUBFRAMES in YAML to override."
+        )
+        rt_subframes = 4
+    try:
+        import carb
+
+        carb.settings.get_settings().set("/omni/replicator/RTSubframes", rt_subframes)
+    except Exception:
+        pass
     dome_paths = []
     if use_dome and dome_textures_base:
         # If DOME_TEXTURES is provided (names without extension), use that curated list.
@@ -784,6 +938,10 @@ def main():
     cam_look_at_offset_min = _vec3(cfg.get("CAM_LOOK_AT_OFFSET_MIN"), default=(0.0, 0.0, 0.0), name="CAM_LOOK_AT_OFFSET_MIN")
     cam_look_at_offset_max = _vec3(cfg.get("CAM_LOOK_AT_OFFSET_MAX"), default=(0.0, 0.0, 0.0), name="CAM_LOOK_AT_OFFSET_MAX")
 
+    cam_look_at_target_mode = str(cfg.get("CAM_LOOK_AT_TARGET_MODE", "first")).strip().lower()
+    if cam_look_at_target_mode not in ("first", "random"):
+        cam_look_at_target_mode = "first"
+
     with rep.trigger.on_frame():
         # Randomize HDR dome background per frame (optional).
         if use_dome and dome_paths:
@@ -794,24 +952,60 @@ def main():
                 intensity=dome_intensity,
             )
 
-        # Sample object pose.
-        pos_dist = rep.distribution.uniform(tuple(min_pos), tuple(max_pos))
-        with obj:
-            rep.modify.pose(
-                position=pos_dist,
-                rotation=rep.distribution.uniform(obj_rot_min, obj_rot_max),
-            )
+        # Sample target poses.
+        target_pos_dists = []
+        for t in targets:
+            tc = t.get("cfg") if isinstance(t.get("cfg"), dict) else {}
 
-            # Avoid overriding the Solo cup USD material (it can look gray if the random
-            # material has high roughness + no good lighting).
-            if not using_usd_asset:
-                mats = rep.create.material_omnipbr(
-                    metallic=0.0,
-                    roughness=rep.distribution.uniform(0.25, 0.45),
-                    diffuse=rep.distribution.uniform((0.75, 0.02, 0.02), (0.95, 0.15, 0.15)),
-                    count=1,
+            t_pos_min = tc.get("POS_MIN")
+            if t_pos_min is None:
+                t_pos_min = tc.get("OBJ_POS_MIN")
+            t_pos_max = tc.get("POS_MAX")
+            if t_pos_max is None:
+                t_pos_max = tc.get("OBJ_POS_MAX")
+
+            if t_pos_min is not None and t_pos_max is not None:
+                try:
+                    t_min = list(_vec3(t_pos_min, name="TARGET.POS_MIN"))
+                    t_max = list(_vec3(t_pos_max, name="TARGET.POS_MAX"))
+                except Exception:
+                    t_min = list(min_pos)
+                    t_max = list(max_pos)
+            else:
+                t_min = list(min_pos)
+                t_max = list(max_pos)
+
+            t_rot_min = tc.get("ROT_MIN")
+            if t_rot_min is None:
+                t_rot_min = tc.get("OBJ_ROT_MIN")
+            t_rot_max = tc.get("ROT_MAX")
+            if t_rot_max is None:
+                t_rot_max = tc.get("OBJ_ROT_MAX")
+
+            try:
+                rot_min_v = _vec3(t_rot_min, default=obj_rot_min, name="TARGET.ROT_MIN")
+                rot_max_v = _vec3(t_rot_max, default=obj_rot_max, name="TARGET.ROT_MAX")
+            except Exception:
+                rot_min_v = obj_rot_min
+                rot_max_v = obj_rot_max
+
+            pos_dist = rep.distribution.uniform(tuple(t_min), tuple(t_max))
+            target_pos_dists.append(pos_dist)
+            with t["item"]:
+                rep.modify.pose(
+                    position=pos_dist,
+                    rotation=rep.distribution.uniform(rot_min_v, rot_max_v),
                 )
-                rep.randomizer.materials(mats)
+
+                # Avoid overriding authored USD materials; only randomize for primitive targets.
+                if not t.get("is_usd", False):
+                    mats = rep.create.material_omnipbr(
+                        metallic=0.0,
+                        roughness=rep.distribution.uniform(0.25, 0.45),
+                        diffuse=rep.distribution.uniform((0.75, 0.02, 0.02), (0.95, 0.15, 0.15)),
+                        count=1,
+                    )
+                    rep.randomizer.materials(mats)
 
         # Randomize distractor poses (visual noise only; no semantics attached).
         # Default behavior: keep them near the object so they appear in-frame.
@@ -857,9 +1051,17 @@ def main():
                 # Better default: keep looking at the sampled object position.
                 # If you want fully decoupled look targets, set CAM_USE_OBJECT_POS_AS_LOOK_AT: false.
                 use_obj_look_at = bool(cfg.get("CAM_USE_OBJECT_POS_AS_LOOK_AT", True))
+
+                chosen_target_pos = target_pos_dists[0] if target_pos_dists else rep.distribution.uniform(tuple(min_pos), tuple(max_pos))
+                if target_pos_dists and len(target_pos_dists) > 1 and cam_look_at_target_mode == "random":
+                    try:
+                        chosen_target_pos = rep.distribution.choice(target_pos_dists)
+                    except Exception:
+                        chosen_target_pos = target_pos_dists[0]
+
                 rep.modify.pose(
                     position=cam_position_dist,
-                    look_at=pos_dist if use_obj_look_at else look_at_target,
+                    look_at=chosen_target_pos if use_obj_look_at else look_at_target,
                 )
             else:
                 rep.modify.pose(
@@ -874,13 +1076,13 @@ def main():
     # Important: `rep.orchestrator.step()` triggers writers, so we temporarily
     # detach the writer during warm-up to avoid an extra image on disk.
     writer.detach()
-    rep.orchestrator.step(rt_subframes=2)
+    rep.orchestrator.step(rt_subframes=rt_subframes)
     writer.attach([render_product])
     print("[min_replicator] Discarded warm-up frame 0 (not written)")
 
     # Step for N frames (written)
     for idx in range(args.frames):
-        rep.orchestrator.step(rt_subframes=2)
+        rep.orchestrator.step(rt_subframes=rt_subframes)
         print(f"[min_replicator] Wrote frame {idx+1}/{args.frames} to {args.output}")
 
     # Optional post-processing export for training datasets.

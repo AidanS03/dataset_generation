@@ -1,0 +1,50 @@
+{
+  "info": {
+    "description": "isaac-sim replicator export",
+    "version": "1.0"
+  },
+  "licenses": [],
+  "images": [
+    {
+      "id": 1,
+      "file_name": "000007.png",
+      "width": 640,
+      "height": 480
+    }
+  ],
+  "annotations": [
+    {
+      "id": 1,
+      "image_id": 1,
+      "category_id": 1,
+      "bbox": [
+        250.0,
+        147.0,
+        87.0,
+        92.0
+      ],
+      "area": 8004.0,
+      "iscrowd": 0
+    },
+    {
+      "id": 2,
+      "image_id": 1,
+      "category_id": 1,
+      "bbox": [
+        192.0,
+        159.0,
+        83.0,
+        86.0
+      ],
+      "area": 7138.0,
+      "iscrowd": 0
+    }
+  ],
+  "categories": [
+    {
+      "id": 1,
+      "name": "cup",
+      "supercategory": "none"
+    }
+  ]
+}
